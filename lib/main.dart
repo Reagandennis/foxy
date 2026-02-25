@@ -1,15 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_quill/flutter_quill.dart' as quill;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config/supabase_config.dart';
+import 'services/theme_mode_service.dart';
 import 'screens/auth/auth_screens.dart';
+import 'screens/home/home_screen.dart';
 import 'screens/onboarding/onboarding_screen.dart';
 import 'theme/app_colors.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await ThemeModeService.init();
 
   if (SupabaseConfig.isConfigured) {
     await Supabase.initialize(
@@ -83,31 +87,68 @@ class _FoxyAppState extends State<FoxyApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Foxy',
-      navigatorKey: _navigatorKey,
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        scaffoldBackgroundColor: appBackground,
-        appBarTheme: const AppBarTheme(
-          backgroundColor: appBackground,
-          foregroundColor: textColor,
-          elevation: 0,
-        ),
-        textTheme: const TextTheme(
-          headlineMedium: TextStyle(
-            color: textColor,
-            fontWeight: FontWeight.w800,
-            height: 1.15,
+    final Widget initialScreen =
+        widget.supabaseReady &&
+            Supabase.instance.client.auth.currentSession != null
+        ? const HomeScreen()
+        : OnboardingScreen(supabaseReady: widget.supabaseReady);
+
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeModeService.notifier,
+      builder: (BuildContext context, ThemeMode mode, Widget? child) {
+        return MaterialApp(
+          title: 'Foxy',
+          navigatorKey: _navigatorKey,
+          debugShowCheckedModeBanner: false,
+          localizationsDelegates:
+              quill.FlutterQuillLocalizations.localizationsDelegates,
+          supportedLocales: quill.FlutterQuillLocalizations.supportedLocales,
+          themeMode: mode,
+          theme: ThemeData(
+            brightness: Brightness.light,
+            scaffoldBackgroundColor: appBackground,
+            appBarTheme: AppBarTheme(
+              backgroundColor: appBackground,
+              foregroundColor: textColor,
+              elevation: 0,
+            ),
+            textTheme: TextTheme(
+              headlineMedium: TextStyle(
+                color: textColor,
+                fontWeight: FontWeight.w800,
+                height: 1.15,
+              ),
+              bodyLarge: TextStyle(
+                color: textColor,
+                fontWeight: FontWeight.w500,
+                height: 1.35,
+              ),
+            ),
           ),
-          bodyLarge: TextStyle(
-            color: textColor,
-            fontWeight: FontWeight.w500,
-            height: 1.35,
+          darkTheme: ThemeData(
+            brightness: Brightness.dark,
+            scaffoldBackgroundColor: appBackground,
+            appBarTheme: AppBarTheme(
+              backgroundColor: appBackground,
+              foregroundColor: textColor,
+              elevation: 0,
+            ),
+            textTheme: TextTheme(
+              headlineMedium: TextStyle(
+                color: textColor,
+                fontWeight: FontWeight.w800,
+                height: 1.15,
+              ),
+              bodyLarge: TextStyle(
+                color: textColor,
+                fontWeight: FontWeight.w500,
+                height: 1.35,
+              ),
+            ),
           ),
-        ),
-      ),
-      home: OnboardingScreen(supabaseReady: widget.supabaseReady),
+          home: initialScreen,
+        );
+      },
     );
   }
 }

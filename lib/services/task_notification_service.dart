@@ -86,12 +86,6 @@ class TaskNotificationService {
       _lastError = error.toString();
       granted = false;
     }
-    try {
-      await androidPlugin?.requestExactAlarmsPermission();
-    } catch (_) {
-      // Exact alarms are optional for current scheduling mode.
-    }
-
     final IOSFlutterLocalNotificationsPlugin? iosPlugin = _plugin
         .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin

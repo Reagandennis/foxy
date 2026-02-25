@@ -128,7 +128,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               AsyncSnapshot<List<_CalendarTask>> snapshot,
             ) {
               if (snapshot.hasError) {
-                return const Center(
+                return Center(
                   child: Padding(
                     padding: EdgeInsets.symmetric(horizontal: 20),
                     child: Text(
@@ -183,7 +183,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                           child: Text(
                             _monthLabel(_focusedMonth),
                             textAlign: TextAlign.center,
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: textColor,
                               fontSize: 20,
                               fontWeight: FontWeight.w800,
@@ -201,7 +201,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     margin: const EdgeInsets.symmetric(horizontal: 14),
                     padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: surfaceColor,
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
                         color: textColor.withValues(alpha: 0.12),
@@ -306,7 +306,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                         ),
                                         child: Text(
                                           '$count',
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                             color: textColor,
                                             fontSize: 11,
                                             fontWeight: FontWeight.w700,
@@ -340,7 +340,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       children: [
                         Text(
                           'Tasks on ${_dateLabel(_selectedDay)}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: textColor,
                             fontWeight: FontWeight.w800,
                             fontSize: 16,
@@ -351,7 +351,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                           Container(
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
-                              color: Colors.white,
+                              color: surfaceColor,
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
                                 color: textColor.withValues(alpha: 0.1),
@@ -398,7 +398,7 @@ class _CalendarTaskTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: surfaceColor,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: textColor.withValues(alpha: 0.1)),
       ),

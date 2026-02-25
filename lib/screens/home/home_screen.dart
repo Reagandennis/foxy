@@ -8,9 +8,11 @@ import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../config/supabase_config.dart';
+import '../../services/storage_cleanup_queue.dart';
 import '../../theme/app_colors.dart';
 import '../auth/auth_screens.dart';
 import '../calendar/calendar_screen.dart';
+import '../profile/profile_screen.dart';
 import '../tasks/tasks_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -26,6 +28,14 @@ class _HomeScreenState extends State<HomeScreen> {
   _HomeSection _activeSection = _HomeSection.notes;
   bool _isSearching = false;
   String _searchQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      StorageCleanupQueue.drain(_client);
+    });
+  }
 
   @override
   void dispose() {
@@ -50,6 +60,126 @@ class _HomeScreenState extends State<HomeScreen> {
           (List<Map<String, dynamic>> rows) =>
               rows.map((_NoteItem.fromMap)).toList()..sort(_compareNotes),
         );
+  }
+
+  Stream<List<_TaskLite>> _tasksLiteStream() {
+    final User? user = _currentUser;
+    if (user == null) {
+      return Stream<List<_TaskLite>>.value(const <_TaskLite>[]);
+    }
+
+    return _client
+        .from('tasks')
+        .stream(primaryKey: <String>['id'])
+        .eq('user_id', user.id)
+        .order('updated_at', ascending: false)
+        .map(
+          (List<Map<String, dynamic>> rows) =>
+              rows.map(_TaskLite.fromMap).toList(growable: false),
+        );
+  }
+
+  bool _sameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  int _completionStreak(List<_TaskLite> tasks) {
+    final Set<String> completedDays = tasks
+        .where((_TaskLite task) => task.isCompleted)
+        .map((_TaskLite task) {
+          final DateTime day = DateTime(
+            task.updatedAt.year,
+            task.updatedAt.month,
+            task.updatedAt.day,
+          );
+          return day.toIso8601String();
+        })
+        .toSet();
+
+    int streak = 0;
+    DateTime cursor = DateTime.now();
+    while (true) {
+      final DateTime day = DateTime(cursor.year, cursor.month, cursor.day);
+      if (!completedDays.contains(day.toIso8601String())) {
+        break;
+      }
+      streak += 1;
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
+  Widget _buildMomentumCard({
+    required List<_NoteItem> notes,
+    required List<_TaskLite> tasks,
+  }) {
+    final int completed = tasks
+        .where((_TaskLite task) => task.isCompleted)
+        .length;
+    final int total = tasks.length;
+    final int todayCompleted = tasks
+        .where(
+          (_TaskLite task) =>
+              task.isCompleted && _sameDay(task.updatedAt, DateTime.now()),
+        )
+        .length;
+    final int streak = _completionStreak(tasks);
+
+    final bool hasNote = notes.isNotEmpty;
+    final bool hasTask = tasks.isNotEmpty;
+    final bool hasReminder = tasks.any(
+      (_TaskLite task) => task.reminderAt != null,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: surfaceColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: textColor.withValues(alpha: 0.12)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _MomentumPill(
+                  icon: Icons.today_rounded,
+                  text: 'Today $todayCompleted done',
+                ),
+                _MomentumPill(
+                  icon: Icons.local_fire_department_rounded,
+                  text: 'Streak ${streak}d',
+                ),
+                _MomentumPill(
+                  icon: Icons.check_circle_rounded,
+                  text: '$completed/$total complete',
+                ),
+              ],
+            ),
+            if (!(hasNote && hasTask && hasReminder)) ...[
+              const SizedBox(height: 10),
+              Text(
+                'First 3 wins',
+                style: TextStyle(
+                  color: textColor.withValues(alpha: 0.85),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 6),
+              _WinRow(done: hasNote, text: 'Create your first note'),
+              _WinRow(done: hasTask, text: 'Create your first task'),
+              _WinRow(done: hasReminder, text: 'Set one reminder'),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   int _compareNotes(_NoteItem a, _NoteItem b) {
@@ -107,7 +237,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await _client.storage.from(_clipsBucket).remove(paths);
     } catch (_) {
-      // Keep note actions resilient if storage cleanup fails.
+      await StorageCleanupQueue.enqueue(bucket: _clipsBucket, paths: paths);
     }
   }
 
@@ -148,10 +278,20 @@ class _HomeScreenState extends State<HomeScreen> {
     Navigator.of(context).pop();
   }
 
-  Future<void> _openNoteEditor({_NoteItem? note}) async {
+  Future<void> _openNoteEditor({
+    _NoteItem? note,
+    String? initialTitle,
+    String? initialBody,
+  }) async {
     final _NoteEditorResult? result = await Navigator.of(context)
         .push<_NoteEditorResult>(
-          MaterialPageRoute(builder: (_) => _NoteEditorScreen(note: note)),
+          MaterialPageRoute(
+            builder: (_) => _NoteEditorScreen(
+              note: note,
+              initialTitle: initialTitle,
+              initialBody: initialBody,
+            ),
+          ),
         );
 
     if (result == null) {
@@ -202,6 +342,59 @@ class _HomeScreenState extends State<HomeScreen> {
         _removedClips(previous: note.clips, next: result.clips),
       );
     }
+  }
+
+  Future<void> _openCreateNoteSheet() async {
+    final ({String title, String body})?
+    selected = await showModalBottomSheet<({String title, String body})>(
+      context: context,
+      backgroundColor: appBackground,
+      builder: (BuildContext context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: Icon(Icons.note_add_rounded, color: textColor),
+                title: const Text('Blank note'),
+                onTap: () {
+                  Navigator.of(context).pop((title: '', body: ''));
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.wb_sunny_rounded, color: textColor),
+                title: const Text('Daily plan template'),
+                onTap: () {
+                  Navigator.of(context).pop((
+                    title: 'Daily Plan',
+                    body:
+                        'Top 3 priorities\n\n1. \n2. \n3. \n\nQuick notes\n\nWins today\n\n',
+                  ));
+                },
+              ),
+              ListTile(
+                leading: Icon(Icons.groups_rounded, color: textColor),
+                title: const Text('Meeting notes template'),
+                onTap: () {
+                  Navigator.of(context).pop((
+                    title: 'Meeting Notes',
+                    body:
+                        'Date:\nAttendees:\n\nAgenda\n- \n\nDiscussion\n- \n\nAction items\n- [ ] \n',
+                  ));
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (!mounted || selected == null) {
+      return;
+    }
+    await _openNoteEditor(
+      initialTitle: selected.title,
+      initialBody: selected.body,
+    );
   }
 
   Future<void> _createNote({
@@ -364,6 +557,57 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _deleteAccount() async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: appBackground,
+          title: const Text('Delete account?'),
+          content: const Text(
+            'This permanently deletes your account, notes, tasks, and uploads.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Delete', style: TextStyle(color: accentRed)),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || confirmed != true) {
+      return;
+    }
+
+    _showSnack('Deleting account...');
+    try {
+      await _client.rpc('delete_my_account');
+      try {
+        await _client.auth.signOut();
+      } catch (_) {
+        // Session may already be invalid after account deletion.
+      }
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: (_) => const LoginScreen(supabaseReady: true),
+        ),
+        (Route<dynamic> route) => false,
+      );
+    } catch (_) {
+      _showSnack(
+        'Could not delete account. Run latest supabase_notes_setup.sql and try again.',
+      );
+    }
+  }
+
   Widget _buildNotesBody() {
     return SafeArea(
       child: Column(
@@ -386,12 +630,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       hintStyle: TextStyle(
                         color: textColor.withValues(alpha: 0.5),
                       ),
-                      prefixIcon: const Icon(
-                        Icons.search_rounded,
-                        color: textColor,
-                      ),
+                      prefixIcon: Icon(Icons.search_rounded, color: textColor),
                       filled: true,
-                      fillColor: Colors.white,
+                      fillColor: inputFillColor,
                       contentPadding: const EdgeInsets.symmetric(
                         horizontal: 14,
                         vertical: 12,
@@ -414,159 +655,212 @@ class _HomeScreenState extends State<HomeScreen> {
                 : null,
           ),
           Expanded(
-            child: StreamBuilder<List<_NoteItem>>(
-              stream: _notesStream(),
-              builder: (BuildContext context, AsyncSnapshot<List<_NoteItem>> snapshot) {
-                if (snapshot.hasError) {
-                  return const _EmptyNotesState(
-                    text:
-                        'Unable to load notes. Verify Supabase table and RLS policies.',
-                  );
-                }
+            child: StreamBuilder<List<_TaskLite>>(
+              stream: _tasksLiteStream(),
+              builder: (BuildContext context, AsyncSnapshot<List<_TaskLite>> taskSnapshot) {
+                final List<_TaskLite> tasks =
+                    taskSnapshot.data ?? const <_TaskLite>[];
+                return StreamBuilder<List<_NoteItem>>(
+                  stream: _notesStream(),
+                  builder:
+                      (
+                        BuildContext context,
+                        AsyncSnapshot<List<_NoteItem>> snapshot,
+                      ) {
+                        if (snapshot.hasError) {
+                          return const _EmptyNotesState(
+                            text:
+                                'Unable to load notes. Verify Supabase table and RLS policies.',
+                          );
+                        }
 
-                if (!snapshot.hasData) {
-                  return const Center(
-                    child: CircularProgressIndicator(color: accentRed),
-                  );
-                }
+                        if (!snapshot.hasData) {
+                          return const Center(
+                            child: CircularProgressIndicator(color: accentRed),
+                          );
+                        }
 
-                final List<_NoteItem> notes = snapshot.data!;
-                final List<_NoteItem> visibleNotes = _applySearch(notes);
-
-                if (visibleNotes.isEmpty) {
-                  return _EmptyNotesState(
-                    text: notes.isEmpty
-                        ? 'No notes yet. Tap the pencil to create your first note.'
-                        : 'No notes match your search.',
-                  );
-                }
-
-                return ListView.separated(
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  itemCount: visibleNotes.length,
-                  separatorBuilder: (_, index) => Divider(
-                    height: 1,
-                    color: textColor.withValues(alpha: 0.12),
-                  ),
-                  itemBuilder: (BuildContext context, int index) {
-                    final _NoteItem note = visibleNotes[index];
-                    final String preview = note.previewText;
-
-                    return Dismissible(
-                      key: ValueKey<String>(note.id),
-                      direction: DismissDirection.endToStart,
-                      background: Container(
-                        alignment: Alignment.centerRight,
-                        padding: const EdgeInsets.only(right: 20),
-                        color: accentRed,
-                        child: const Icon(
-                          Icons.delete_rounded,
-                          color: Colors.white,
-                        ),
-                      ),
-                      confirmDismiss: (_) async {
-                        final bool? shouldDelete = await showDialog<bool>(
-                          context: context,
-                          builder: (BuildContext context) {
-                            return AlertDialog(
-                              backgroundColor: appBackground,
-                              title: const Text('Delete note?'),
-                              content: const Text(
-                                'This action cannot be undone.',
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () {
-                                    Navigator.of(context).pop(false);
-                                  },
-                                  child: const Text('Cancel'),
-                                ),
-                                TextButton(
-                                  onPressed: () {
-                                    Navigator.of(context).pop(true);
-                                  },
-                                  child: const Text(
-                                    'Delete',
-                                    style: TextStyle(color: accentRed),
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
+                        final List<_NoteItem> notes = snapshot.data!;
+                        final List<_NoteItem> visibleNotes = _applySearch(
+                          notes,
                         );
-                        return shouldDelete == true;
-                      },
-                      onDismissed: (_) =>
-                          _deleteNote(note.id, clips: note.clips),
-                      child: ListTile(
-                        onTap: () => _openNoteEditor(note: note),
-                        onLongPress: () => _togglePin(note),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 2,
-                          vertical: 6,
-                        ),
-                        title: Text(
-                          note.title.isEmpty ? 'Untitled note' : note.title,
-                          style: const TextStyle(
-                            color: textColor,
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: preview.isEmpty
-                            ? null
-                            : Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Text(
-                                  preview,
-                                  style: TextStyle(
-                                    color: textColor.withValues(alpha: 0.78),
-                                    fontSize: 14,
-                                    height: 1.32,
-                                  ),
-                                  maxLines: 3,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                        trailing: SizedBox(
-                          width: 72,
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.end,
+                        final bool showMomentum = _searchQuery.isEmpty;
+
+                        if (visibleNotes.isEmpty) {
+                          return Column(
                             children: [
-                              IconButton(
-                                onPressed: () => _togglePin(note),
-                                iconSize: 18,
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(
-                                  minWidth: 26,
-                                  minHeight: 26,
-                                ),
-                                icon: Icon(
-                                  note.isPinned
-                                      ? Icons.push_pin_rounded
-                                      : Icons.push_pin_outlined,
-                                  color: note.isPinned
-                                      ? accentRed
-                                      : textColor.withValues(alpha: 0.45),
-                                ),
-                              ),
-                              Text(
-                                _formatStamp(note.updatedAt),
-                                style: TextStyle(
-                                  color: textColor.withValues(alpha: 0.52),
-                                  fontWeight: FontWeight.w600,
+                              if (showMomentum)
+                                _buildMomentumCard(notes: notes, tasks: tasks),
+                              Expanded(
+                                child: _EmptyNotesState(
+                                  text: notes.isEmpty
+                                      ? 'No notes yet. Tap the pencil to create your first note.'
+                                      : 'No notes match your search.',
                                 ),
                               ),
                             ],
-                          ),
-                        ),
-                      ),
-                    );
-                  },
+                          );
+                        }
+
+                        return Column(
+                          children: [
+                            if (showMomentum)
+                              _buildMomentumCard(notes: notes, tasks: tasks),
+                            Expanded(
+                              child: ListView.separated(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                ),
+                                itemCount: visibleNotes.length,
+                                separatorBuilder: (_, index) => Divider(
+                                  height: 1,
+                                  color: textColor.withValues(alpha: 0.12),
+                                ),
+                                itemBuilder: (BuildContext context, int index) {
+                                  final _NoteItem note = visibleNotes[index];
+                                  final String preview = note.previewText;
+
+                                  return Dismissible(
+                                    key: ValueKey<String>(note.id),
+                                    direction: DismissDirection.endToStart,
+                                    background: Container(
+                                      alignment: Alignment.centerRight,
+                                      padding: const EdgeInsets.only(right: 20),
+                                      color: accentRed,
+                                      child: const Icon(
+                                        Icons.delete_rounded,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    confirmDismiss: (_) async {
+                                      final bool?
+                                      shouldDelete = await showDialog<bool>(
+                                        context: context,
+                                        builder: (BuildContext context) {
+                                          return AlertDialog(
+                                            backgroundColor: appBackground,
+                                            title: const Text('Delete note?'),
+                                            content: const Text(
+                                              'This action cannot be undone.',
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () {
+                                                  Navigator.of(
+                                                    context,
+                                                  ).pop(false);
+                                                },
+                                                child: const Text('Cancel'),
+                                              ),
+                                              TextButton(
+                                                onPressed: () {
+                                                  Navigator.of(
+                                                    context,
+                                                  ).pop(true);
+                                                },
+                                                child: const Text(
+                                                  'Delete',
+                                                  style: TextStyle(
+                                                    color: accentRed,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      );
+                                      return shouldDelete == true;
+                                    },
+                                    onDismissed: (_) =>
+                                        _deleteNote(note.id, clips: note.clips),
+                                    child: ListTile(
+                                      onTap: () => _openNoteEditor(note: note),
+                                      onLongPress: () => _togglePin(note),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                            horizontal: 2,
+                                            vertical: 6,
+                                          ),
+                                      title: Text(
+                                        note.title.isEmpty
+                                            ? 'Untitled note'
+                                            : note.title,
+                                        style: TextStyle(
+                                          color: textColor,
+                                          fontSize: 17,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      subtitle: preview.isEmpty
+                                          ? null
+                                          : Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 4,
+                                              ),
+                                              child: Text(
+                                                preview,
+                                                style: TextStyle(
+                                                  color: textColor.withValues(
+                                                    alpha: 0.78,
+                                                  ),
+                                                  fontSize: 14,
+                                                  height: 1.32,
+                                                ),
+                                                maxLines: 3,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                      trailing: SizedBox(
+                                        width: 72,
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.end,
+                                          children: [
+                                            IconButton(
+                                              onPressed: () => _togglePin(note),
+                                              iconSize: 18,
+                                              visualDensity:
+                                                  VisualDensity.compact,
+                                              padding: EdgeInsets.zero,
+                                              constraints: const BoxConstraints(
+                                                minWidth: 26,
+                                                minHeight: 26,
+                                              ),
+                                              icon: Icon(
+                                                note.isPinned
+                                                    ? Icons.push_pin_rounded
+                                                    : Icons.push_pin_outlined,
+                                                color: note.isPinned
+                                                    ? accentRed
+                                                    : textColor.withValues(
+                                                        alpha: 0.45,
+                                                      ),
+                                              ),
+                                            ),
+                                            Text(
+                                              _formatStamp(note.updatedAt),
+                                              style: TextStyle(
+                                                color: textColor.withValues(
+                                                  alpha: 0.52,
+                                                ),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                 );
               },
             ),
@@ -587,7 +881,7 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             children: [
               const SizedBox(height: 20),
-              const ListTile(
+              ListTile(
                 leading: Icon(Icons.pets_rounded, color: accentRed),
                 title: Text(
                   'Foxy',
@@ -608,7 +902,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   accent: accentRed,
                   symbol: Icons.sticky_note_2_rounded,
                 ),
-                title: const Text(
+                title: Text(
                   'Notes',
                   style: TextStyle(
                     color: textColor,
@@ -624,7 +918,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   accent: accentGold,
                   symbol: Icons.checklist_rounded,
                 ),
-                title: const Text(
+                title: Text(
                   'Tasks',
                   style: TextStyle(
                     color: textColor,
@@ -640,7 +934,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   accent: accentRed,
                   symbol: Icons.calendar_month_rounded,
                 ),
-                title: const Text(
+                title: Text(
                   'Calendar',
                   style: TextStyle(
                     color: textColor,
@@ -651,13 +945,29 @@ class _HomeScreenState extends State<HomeScreen> {
                 selectedTileColor: accentRed.withValues(alpha: 0.1),
                 onTap: () => _switchSection(_HomeSection.calendar),
               ),
+              ListTile(
+                leading: const _DrawerFoxIcon(
+                  accent: accentGold,
+                  symbol: Icons.person_rounded,
+                ),
+                title: Text(
+                  'Profile',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                selected: _activeSection == _HomeSection.profile,
+                selectedTileColor: accentRed.withValues(alpha: 0.1),
+                onTap: () => _switchSection(_HomeSection.profile),
+              ),
               const Divider(height: 28),
               ListTile(
                 leading: const _DrawerFoxIcon(
                   accent: accentGold,
                   symbol: Icons.logout_rounded,
                 ),
-                title: const Text(
+                title: Text(
                   'Log out',
                   style: TextStyle(
                     color: textColor,
@@ -665,6 +975,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 onTap: _logOut,
+              ),
+              ListTile(
+                leading: const _DrawerFoxIcon(
+                  accent: accentRed,
+                  symbol: Icons.person_remove_rounded,
+                ),
+                title: Text(
+                  'Delete account',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                onTap: _deleteAccount,
               ),
             ],
           ),
@@ -684,7 +1008,7 @@ class _HomeScreenState extends State<HomeScreen> {
           builder: (BuildContext context) {
             return IconButton(
               onPressed: () => Scaffold.of(context).openDrawer(),
-              icon: const Icon(Icons.menu_rounded, color: textColor),
+              icon: Icon(Icons.menu_rounded, color: textColor),
             );
           },
         ),
@@ -715,10 +1039,11 @@ class _HomeScreenState extends State<HomeScreen> {
         _HomeSection.notes => _buildNotesBody(),
         _HomeSection.tasks => const TasksScreen(),
         _HomeSection.calendar => const CalendarScreen(),
+        _HomeSection.profile => const ProfileScreen(),
       },
       floatingActionButton: isNotes
           ? FloatingActionButton(
-              onPressed: () => _openNoteEditor(),
+              onPressed: _openCreateNoteSheet,
               backgroundColor: accentRed,
               foregroundColor: Colors.white,
               child: const Icon(Icons.edit_rounded),
@@ -741,7 +1066,7 @@ class _EmptyNotesState extends StatelessWidget {
         child: Text(
           text,
           textAlign: TextAlign.center,
-          style: const TextStyle(
+          style: TextStyle(
             color: textColor,
             fontSize: 15,
             fontWeight: FontWeight.w600,
@@ -753,13 +1078,80 @@ class _EmptyNotesState extends StatelessWidget {
   }
 }
 
-enum _HomeSection { notes, tasks, calendar }
+class _MomentumPill extends StatelessWidget {
+  const _MomentumPill({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: appBackground,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: textColor.withValues(alpha: 0.78)),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: textColor.withValues(alpha: 0.8),
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WinRow extends StatelessWidget {
+  const _WinRow({required this.done, required this.text});
+
+  final bool done;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Icon(
+            done ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
+            size: 16,
+            color: done
+                ? Colors.green.shade700
+                : textColor.withValues(alpha: 0.5),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            text,
+            style: TextStyle(
+              color: textColor.withValues(alpha: done ? 0.86 : 0.66),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+enum _HomeSection { notes, tasks, calendar, profile }
 
 extension _HomeSectionX on _HomeSection {
   String get label => switch (this) {
     _HomeSection.notes => 'Notes',
     _HomeSection.tasks => 'Tasks',
     _HomeSection.calendar => 'Calendar',
+    _HomeSection.profile => 'Profile',
   };
 }
 
@@ -808,15 +1200,21 @@ class _DrawerFoxIcon extends StatelessWidget {
 }
 
 class _NoteEditorScreen extends StatefulWidget {
-  const _NoteEditorScreen({this.note});
+  const _NoteEditorScreen({this.note, this.initialTitle, this.initialBody});
 
   final _NoteItem? note;
+  final String? initialTitle;
+  final String? initialBody;
 
   @override
   State<_NoteEditorScreen> createState() => _NoteEditorScreenState();
 }
 
 class _NoteEditorScreenState extends State<_NoteEditorScreen> {
+  static const int _maxPhotoBytes = 15 * 1024 * 1024;
+  static const int _maxVideoBytes = 80 * 1024 * 1024;
+  static const int _maxWebClipBytes = 5 * 1024 * 1024;
+
   final SupabaseClient _client = Supabase.instance.client;
   final Map<String, Future<String?>> _photoPreviewUrlCache =
       <String, Future<String?>>{};
@@ -833,11 +1231,14 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
   late List<_NoteClip> _clips;
   bool _isUploadingClip = false;
 
+  bool get _showKeyboardToolbar =>
+      _bodyFocusNode.hasFocus && MediaQuery.of(context).viewInsets.bottom > 0;
+
   @override
   void initState() {
     super.initState();
-    _initialTitle = widget.note?.title ?? '';
-    _initialBody = widget.note?.body ?? '';
+    _initialTitle = widget.note?.title ?? widget.initialTitle ?? '';
+    _initialBody = widget.note?.body ?? widget.initialBody ?? '';
     _initialPinned = widget.note?.isPinned ?? false;
     _initialClips = List<_NoteClip>.from(
       widget.note?.clips ?? const <_NoteClip>[],
@@ -846,20 +1247,57 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
     _clips = List<_NoteClip>.from(_initialClips);
     _titleController = TextEditingController(text: _initialTitle);
     _bodyController = _NoteBodyCodec.controllerFromStorage(_initialBody);
-    _bodyFocusNode = FocusNode();
+    _bodyFocusNode = FocusNode()..addListener(_onBodyFocusChanged);
     _bodyScrollController = ScrollController();
     _initialBodySignature = _NoteBodyCodec.canonicalDeltaJsonFromStorage(
       _initialBody,
     );
   }
 
+  void _onBodyFocusChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+  }
+
   @override
   void dispose() {
     _titleController.dispose();
     _bodyController.dispose();
+    _bodyFocusNode.removeListener(_onBodyFocusChanged);
     _bodyFocusNode.dispose();
     _bodyScrollController.dispose();
     super.dispose();
+  }
+
+  Widget _buildKeyboardToolbar() {
+    return Material(
+      color: appBackground,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(color: textColor.withValues(alpha: 0.1)),
+          ),
+        ),
+        child: quill.QuillSimpleToolbar(
+          controller: _bodyController,
+          config: const quill.QuillSimpleToolbarConfig(
+            multiRowsDisplay: false,
+            showFontFamily: false,
+            showFontSize: false,
+            showColorButton: false,
+            showBackgroundColorButton: false,
+            showSearchButton: false,
+            showSubscript: false,
+            showSuperscript: false,
+            showDirection: false,
+            showLink: false,
+          ),
+        ),
+      ),
+    );
   }
 
   bool _clipsEqual(List<_NoteClip> a, List<_NoteClip> b) {
@@ -1142,6 +1580,17 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
         _showSnack('Could not read selected file.');
         return;
       }
+      final int fileSize = bytesRaw.length;
+      final int maxSize = type == _NoteClipType.photo
+          ? _maxPhotoBytes
+          : _maxVideoBytes;
+      if (fileSize > maxSize) {
+        final int maxMb = maxSize ~/ (1024 * 1024);
+        _showSnack(
+          'File too large. Max $maxMb MB for ${type.label.toLowerCase()}.',
+        );
+        return;
+      }
 
       setState(() {
         _isUploadingClip = true;
@@ -1213,10 +1662,8 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
       return null;
     }
     final Uri? uri = Uri.tryParse(value);
-    if (uri == null ||
-        !uri.hasScheme ||
-        !(uri.isScheme('http') || uri.isScheme('https'))) {
-      _showSnack('Enter a valid http/https URL.');
+    if (uri == null || !uri.hasScheme || !uri.isScheme('https')) {
+      _showSnack('Enter a valid HTTPS URL.');
       return null;
     }
     return uri.toString();
@@ -1249,7 +1696,7 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
         _showSnack('Webpage is empty.');
         return;
       }
-      if (bytes.length > 5 * 1024 * 1024) {
+      if (bytes.length > _maxWebClipBytes) {
         _showSnack('Webpage too large to clip (max 5MB).');
         return;
       }
@@ -1297,19 +1744,19 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               ListTile(
-                leading: const Icon(Icons.photo_outlined, color: textColor),
+                leading: Icon(Icons.photo_outlined, color: textColor),
                 title: const Text('Photo clip'),
                 subtitle: const Text('Upload from gallery'),
                 onTap: () => Navigator.of(context).pop(_NoteClipType.photo),
               ),
               ListTile(
-                leading: const Icon(Icons.videocam_outlined, color: textColor),
+                leading: Icon(Icons.videocam_outlined, color: textColor),
                 title: const Text('Video clip'),
                 subtitle: const Text('Upload from gallery'),
                 onTap: () => Navigator.of(context).pop(_NoteClipType.video),
               ),
               ListTile(
-                leading: const Icon(Icons.link_rounded, color: textColor),
+                leading: Icon(Icons.link_rounded, color: textColor),
                 title: const Text('Web clipper'),
                 subtitle: const Text('Save webpage snapshot'),
                 onTap: () => Navigator.of(context).pop(_NoteClipType.webClip),
@@ -1386,6 +1833,9 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
         _saveAndExit();
       },
       child: Scaffold(
+        bottomNavigationBar: _showKeyboardToolbar
+            ? _buildKeyboardToolbar()
+            : null,
         appBar: AppBar(
           title: const Text('Note'),
           actions: [
@@ -1417,7 +1867,7 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
               children: [
                 TextField(
                   controller: _titleController,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: textColor,
                     fontSize: 34,
                     fontWeight: FontWeight.w800,
@@ -1510,46 +1960,14 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
                   ),
                   const SizedBox(height: 8),
                 ],
-                Container(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: textColor.withValues(alpha: 0.1)),
-                  ),
-                  child: quill.QuillSimpleToolbar(
-                    controller: _bodyController,
-                    config: const quill.QuillSimpleToolbarConfig(
-                      showFontFamily: false,
-                      showFontSize: false,
-                      showColorButton: false,
-                      showBackgroundColorButton: false,
-                      showSearchButton: false,
-                      showSubscript: false,
-                      showSuperscript: false,
-                      showDirection: false,
-                      showLink: false,
-                    ),
-                  ),
-                ),
                 Expanded(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: textColor.withValues(alpha: 0.1),
-                      ),
-                    ),
-                    child: quill.QuillEditor(
-                      controller: _bodyController,
-                      focusNode: _bodyFocusNode,
-                      scrollController: _bodyScrollController,
-                      config: const quill.QuillEditorConfig(
-                        placeholder: 'Start typing your note...',
-                        expands: true,
-                        padding: EdgeInsets.fromLTRB(12, 12, 12, 12),
-                      ),
+                  child: quill.QuillEditor(
+                    controller: _bodyController,
+                    focusNode: _bodyFocusNode,
+                    scrollController: _bodyScrollController,
+                    config: const quill.QuillEditorConfig(
+                      placeholder: 'Start typing your note...',
+                      padding: EdgeInsets.fromLTRB(0, 8, 0, 8),
                     ),
                   ),
                 ),
@@ -1666,6 +2084,30 @@ class _NoteItem {
   final String plainBody;
   final bool isPinned;
   final List<_NoteClip> clips;
+  final DateTime updatedAt;
+}
+
+class _TaskLite {
+  const _TaskLite({
+    required this.isCompleted,
+    required this.reminderAt,
+    required this.updatedAt,
+  });
+
+  factory _TaskLite.fromMap(Map<String, dynamic> map) {
+    return _TaskLite(
+      isCompleted: map['is_completed'] == true,
+      reminderAt: DateTime.tryParse(
+        map['reminder_at']?.toString() ?? '',
+      )?.toLocal(),
+      updatedAt:
+          DateTime.tryParse(map['updated_at']?.toString() ?? '')?.toLocal() ??
+          DateTime.now(),
+    );
+  }
+
+  final bool isCompleted;
+  final DateTime? reminderAt;
   final DateTime updatedAt;
 }
 

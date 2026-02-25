@@ -40,6 +40,9 @@ dependencies:
   flutter_local_notifications: ^21.0.0-dev.2
   timezone: ^0.11.0
   flutter_quill: ^11.5.0
+  shared_preferences: ^2.5.4
+  in_app_review: ^2.0.11
+  share_plus: ^12.0.1
 
 dev_dependencies:
   flutter_test:

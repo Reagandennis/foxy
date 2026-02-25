@@ -16,9 +16,11 @@ This repository is open to contributions from Flutter, Supabase, and product-min
 - [Local Development Setup](#local-development-setup)
 - [Supabase Setup](#supabase-setup)
 - [Environment Variables](#environment-variables)
+- [Android Release Signing](#android-release-signing)
 - [Run, Analyze, Test](#run-analyze-test)
 - [Data Model Notes](#data-model-notes)
 - [Notifications](#notifications)
+- [Google Play MVP Checklist](#google-play-mvp-checklist)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [Roadmap Ideas](#roadmap-ideas)
@@ -36,10 +38,12 @@ Foxy is designed for personal productivity workflows that require:
 - 3-slide onboarding flow
 - Supabase sign up, sign in, reset password
 - In-app password recovery via deep link (`foxy://reset-password/`)
+- In-app account deletion flow (with data cleanup)
 
 ### Notes
 - Rich-text note editing (titles, headings, paragraphs, lists, formatting)
 - Pin/unpin notes and pinned-first sorting
+- Quick templates (blank, daily plan, meeting notes)
 - Insert clips:
   - Photo upload
   - Video upload
@@ -53,6 +57,8 @@ Foxy is designed for personal productivity workflows that require:
 - Media attachments (image/video)
 - Due date and reminder scheduling
 - Local notifications and in-app permission controls
+- Weekly recap sharing
+- Completion celebration and app rating prompt
 - Realtime task sync with Supabase
 
 ### Calendar
@@ -60,12 +66,19 @@ Foxy is designed for personal productivity workflows that require:
 - Daily task list on date tap
 - Uses task dates from `due_at`, fallback `reminder_at`, then `created_at`
 
+### Retention UX
+- Momentum panel in Notes (today completed, streak, completion ratio)
+- “First 3 wins” onboarding checklist for activation
+
 ## Tech Stack
 - Flutter (stable channel)
 - Supabase (`supabase_flutter`)
 - Local notifications (`flutter_local_notifications`)
 - File handling (`file_picker`)
 - Rich text editor (`flutter_quill`)
+- Local storage (`shared_preferences`)
+- Sharing (`share_plus`)
+- Store review prompt (`in_app_review`)
 
 ## Project Structure
 ```text
@@ -122,6 +135,7 @@ What it sets up:
   - `task-assets`
 - storage object policies scoped by authenticated user folder
 - triggers to maintain `updated_at`
+- `public.delete_my_account()` RPC for secure self-delete flow
 - realtime publication entries for notes and tasks
 
 Important:
@@ -148,6 +162,34 @@ Notes:
 - `SUPABASE_CLIPS_BUCKET` defaults to `note-clips`
 - `SUPABASE_TASKS_BUCKET` defaults to `task-assets`
 - `SUPABASE_RESET_REDIRECT` defaults to `foxy://reset-password/`
+
+## Android Release Signing
+
+### 1) Set app id and version in `android/local.properties`
+Add:
+```properties
+FOXY_APP_ID=com.yourcompany.foxy
+FOXY_VERSION_CODE=1
+FOXY_VERSION_NAME=1.0.0
+```
+
+### 2) Create upload key config
+Copy:
+```bash
+cp android/key.properties.example android/key.properties
+```
+
+Update values in `android/key.properties`:
+```properties
+storeFile=../upload-keystore.jks
+storePassword=...
+keyAlias=upload
+keyPassword=...
+```
+
+Notes:
+- `android/key.properties` is gitignored.
+- Without this file, release builds fall back to debug signing (for local testing only).
 
 ## Run, Analyze, Test
 ```bash
@@ -182,7 +224,6 @@ Local task reminders are handled by `TaskNotificationService`.
 Android setup includes:
 - `POST_NOTIFICATIONS`
 - `RECEIVE_BOOT_COMPLETED`
-- `SCHEDULE_EXACT_ALARM`
 - core library desugaring enabled in `android/app/build.gradle.kts`
 
 If notifications are not appearing:
@@ -190,6 +231,39 @@ If notifications are not appearing:
 - tap `Enable alerts`
 - tap `Test alert`
 - verify OS-level notification permission for Foxy
+
+## Google Play MVP Checklist
+
+### App and policy readiness
+1. Use a real app id (`FOXY_APP_ID`) and signed release key.
+2. Prepare privacy policy URL (required for account/data features).
+3. Complete Play Console Data safety form accurately.
+4. Verify account deletion path from inside app (already implemented).
+5. Confirm Supabase RLS/policies are active in production project.
+
+### Product quality gate
+1. Run:
+   - `flutter analyze`
+   - `flutter test`
+2. Test on physical Android device:
+   - auth + password recovery
+   - media uploads (photo/video/web clip)
+   - task reminders + test alert
+   - calendar task visibility
+   - account deletion
+3. Build release bundle:
+   - `flutter build appbundle --release --dart-define-from-file=supabase.local.json`
+
+### Play listing conversion basics
+1. Add clear screenshots for:
+   - Notes rich editor + clips
+   - Tasks with reminders
+   - Calendar with task counts
+2. Write store description around outcomes:
+   - capture fast
+   - finish daily priorities
+   - keep momentum
+3. Add concise release notes for each update.
 
 ## Troubleshooting
 

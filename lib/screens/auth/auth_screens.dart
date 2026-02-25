@@ -57,13 +57,24 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      Navigator.of(
-        context,
-      ).pushReplacement(MaterialPageRoute(builder: (_) => const HomeScreen()));
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        (Route<dynamic> route) => false,
+      );
     } on AuthException catch (error) {
       _showMessage(error.message);
-    } catch (_) {
-      _showMessage('Unable to sign in right now. Try again.');
+    } catch (error) {
+      final String raw = error.toString();
+      final String lower = raw.toLowerCase();
+      if (lower.contains('socketexception') ||
+          lower.contains('timed out') ||
+          lower.contains('failed host lookup')) {
+        _showMessage(
+          'Network issue while signing in. Check internet and retry.',
+        );
+      } else {
+        _showMessage('Unable to sign in: $raw');
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -160,7 +171,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Text(
+                      Text(
                         'Need an account?',
                         style: TextStyle(
                           color: textColor,
@@ -435,7 +446,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
                       onPressed: _isLoading ? null : _sendResetLink,
                       style: _secondaryButtonStyle(),
                       child: _isLoading
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 20,
                               height: 20,
                               child: CircularProgressIndicator(
@@ -606,7 +617,7 @@ class _UpdatePasswordScreenState extends State<UpdatePasswordScreen> {
                       onPressed: _isLoading ? null : _updatePassword,
                       style: _secondaryButtonStyle(),
                       child: _isLoading
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 20,
                               height: 20,
                               child: CircularProgressIndicator(
@@ -649,7 +660,7 @@ class _AuthHeader extends StatelessWidget {
         const SizedBox(height: 8),
         Text(
           title,
-          style: const TextStyle(
+          style: TextStyle(
             color: textColor,
             fontSize: 30,
             fontWeight: FontWeight.w800,
@@ -659,7 +670,7 @@ class _AuthHeader extends StatelessWidget {
         const SizedBox(height: 10),
         Text(
           subtitle,
-          style: const TextStyle(
+          style: TextStyle(
             color: textColor,
             fontSize: 16,
             fontWeight: FontWeight.w500,
@@ -684,7 +695,7 @@ class _ConfigWarning extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: textColor.withValues(alpha: 0.1)),
       ),
-      child: const Text(
+      child: Text(
         'Supabase is not initialized yet. Run with --dart-define SUPABASE_URL and SUPABASE_ANON_KEY.',
         style: TextStyle(color: textColor, fontWeight: FontWeight.w600),
       ),
@@ -697,7 +708,7 @@ InputDecoration _fieldDecoration({required String label, Widget? suffix}) {
     labelText: label,
     labelStyle: TextStyle(color: textColor.withValues(alpha: 0.8)),
     filled: true,
-    fillColor: Colors.white.withValues(alpha: 0.92),
+    fillColor: inputFillColor,
     suffixIcon: suffix,
     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
     border: OutlineInputBorder(

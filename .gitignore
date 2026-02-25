@@ -46,3 +46,6 @@ app.*.map.json
 
 # Local secrets
 supabase.local.json
+android/key.properties
+*.jks
+*.keystore

@@ -1,4 +1,4 @@
-package com.example.foxy
+package com.foxy.app
 
 import io.flutter.embedding.android.FlutterActivity
 

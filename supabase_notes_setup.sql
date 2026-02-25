@@ -212,6 +212,33 @@ grant usage on schema public to authenticated;
 grant select, insert, update, delete on table public.notes to authenticated;
 grant select, insert, update, delete on table public.tasks to authenticated;
 
+create or replace function public.delete_my_account()
+returns void
+language plpgsql
+security definer
+set search_path = public, auth, storage
+as $$
+declare
+  target_user uuid := auth.uid();
+begin
+  if target_user is null then
+    raise exception 'not_authenticated';
+  end if;
+
+  delete from storage.objects
+  where bucket_id in ('note-clips', 'task-assets')
+    and (storage.foldername(name))[1] = target_user::text;
+
+  delete from public.notes where user_id = target_user;
+  delete from public.tasks where user_id = target_user;
+
+  delete from auth.users where id = target_user;
+end;
+$$;
+
+revoke all on function public.delete_my_account() from public;
+grant execute on function public.delete_my_account() to authenticated;
+
 insert into storage.buckets (id, name, public)
 values ('note-clips', 'note-clips', false)
 on conflict (id) do nothing;

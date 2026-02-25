@@ -1,10 +1,13 @@
-import 'dart:typed_data';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:in_app_review/in_app_review.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../config/supabase_config.dart';
+import '../../services/storage_cleanup_queue.dart';
 import '../../services/task_notification_service.dart';
 import '../../theme/app_colors.dart';
 
@@ -16,6 +19,9 @@ class TasksScreen extends StatefulWidget {
 }
 
 class _TasksScreenState extends State<TasksScreen> {
+  static const String _ratingPromptedKey = 'foxy.rating_prompted.v1';
+  static const String _completionEventsKey = 'foxy.completion_events.v1';
+
   final SupabaseClient _client = Supabase.instance.client;
   bool _requestingNotificationPermission = false;
   bool? _notificationsEnabled;
@@ -27,6 +33,7 @@ class _TasksScreenState extends State<TasksScreen> {
     super.initState();
     TaskNotificationService.initialize();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      StorageCleanupQueue.drain(_client);
       _refreshNotificationStatus();
       _requestNotificationPermission(showFeedback: false);
     });
@@ -105,6 +112,116 @@ class _TasksScreenState extends State<TasksScreen> {
       _showSnack('Test notification sent.');
     } catch (_) {
       _showSnack('Could not send test notification.');
+    }
+  }
+
+  Future<void> _shareWeeklyRecap() async {
+    final User? user = _currentUser;
+    if (user == null) {
+      _showSnack('Session ended. Log in again.');
+      return;
+    }
+
+    try {
+      final List<dynamic> rows = await _client
+          .from('tasks')
+          .select('is_completed,updated_at')
+          .eq('user_id', user.id);
+      final DateTime now = DateTime.now();
+      final DateTime weekStart = DateTime(
+        now.year,
+        now.month,
+        now.day,
+      ).subtract(Duration(days: now.weekday - 1));
+
+      int completedWeek = 0;
+      int touchedWeek = 0;
+      int openTasks = 0;
+
+      for (final dynamic raw in rows) {
+        if (raw is! Map) {
+          continue;
+        }
+        final bool isCompleted = raw['is_completed'] == true;
+        final DateTime updatedAt =
+            DateTime.tryParse(raw['updated_at']?.toString() ?? '')?.toLocal() ??
+            now;
+        if (!isCompleted) {
+          openTasks += 1;
+        }
+        if (!updatedAt.isBefore(weekStart)) {
+          touchedWeek += 1;
+          if (isCompleted) {
+            completedWeek += 1;
+          }
+        }
+      }
+
+      final String recap =
+          'My Foxy weekly recap:\n'
+          '- Tasks completed this week: $completedWeek\n'
+          '- Tasks touched this week: $touchedWeek\n'
+          '- Open tasks: $openTasks\n'
+          '#FoxyApp';
+
+      await SharePlus.instance.share(
+        ShareParams(text: recap, subject: 'My Foxy weekly recap'),
+      );
+    } catch (_) {
+      _showSnack('Could not share weekly recap.');
+    }
+  }
+
+  Future<void> _maybePromptForRating() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final int nextCount = (prefs.getInt(_completionEventsKey) ?? 0) + 1;
+    await prefs.setInt(_completionEventsKey, nextCount);
+
+    final bool alreadyPrompted = prefs.getBool(_ratingPromptedKey) == true;
+    if (alreadyPrompted || nextCount < 7 || !mounted) {
+      return;
+    }
+
+    final bool? rateNow = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: appBackground,
+          title: const Text('Enjoying Foxy?'),
+          content: const Text('Would you like to rate the app?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Later'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('No thanks'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Rate now'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (rateNow == null) {
+      return;
+    }
+
+    await prefs.setBool(_ratingPromptedKey, true);
+    if (!rateNow) {
+      return;
+    }
+
+    final InAppReview inAppReview = InAppReview.instance;
+    final bool canReview = await inAppReview.isAvailable();
+    if (canReview) {
+      await inAppReview.requestReview();
+    } else {
+      await inAppReview.openStoreListing();
     }
   }
 
@@ -210,7 +327,7 @@ class _TasksScreenState extends State<TasksScreen> {
     try {
       await _client.storage.from(_tasksBucket).remove(paths);
     } catch (_) {
-      // Avoid blocking task CRUD if file cleanup fails.
+      await StorageCleanupQueue.enqueue(bucket: _tasksBucket, paths: paths);
     }
   }
 
@@ -405,6 +522,11 @@ class _TasksScreenState extends State<TasksScreen> {
         reminderAt: task.reminderAt,
         isCompleted: completed,
       );
+      if (completed && !task.isCompleted) {
+        HapticFeedback.lightImpact();
+        _showSnack('Nice work. Task completed.');
+        await _maybePromptForRating();
+      }
     } catch (_) {
       _showSnack('Could not update task status.');
     }
@@ -444,7 +566,7 @@ class _TasksScreenState extends State<TasksScreen> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: surfaceColor,
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(
                       color: textColor.withValues(alpha: 0.12),
@@ -453,7 +575,7 @@ class _TasksScreenState extends State<TasksScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'Plan tasks, subtasks, files, links, and reminders.',
                         style: TextStyle(
                           color: textColor,
@@ -500,6 +622,11 @@ class _TasksScreenState extends State<TasksScreen> {
                             icon: const Icon(Icons.notification_add_rounded),
                             label: const Text('Test alert'),
                           ),
+                          OutlinedButton.icon(
+                            onPressed: _shareWeeklyRecap,
+                            icon: const Icon(Icons.ios_share_rounded),
+                            label: const Text('Share recap'),
+                          ),
                         ],
                       ),
                     ],
@@ -525,7 +652,8 @@ class _TasksScreenState extends State<TasksScreen> {
                     final List<_TaskItem> tasks = snapshot.data!;
                     if (tasks.isEmpty) {
                       return const _TasksEmptyState(
-                        text: 'No tasks yet. Tap Add task to get started.',
+                        text:
+                            'No tasks yet. Tap Add task and set one reminder to start your streak.',
                       );
                     }
 
@@ -709,7 +837,7 @@ class _TaskMetaPill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: surfaceColor,
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: textColor.withValues(alpha: 0.12)),
       ),
@@ -745,7 +873,7 @@ class _TasksEmptyState extends StatelessWidget {
         child: Text(
           text,
           textAlign: TextAlign.center,
-          style: const TextStyle(
+          style: TextStyle(
             color: textColor,
             fontWeight: FontWeight.w600,
             height: 1.35,
@@ -767,6 +895,9 @@ class _TaskEditorScreen extends StatefulWidget {
 }
 
 class _TaskEditorScreenState extends State<_TaskEditorScreen> {
+  static const int _maxImageAttachmentBytes = 15 * 1024 * 1024;
+  static const int _maxVideoAttachmentBytes = 80 * 1024 * 1024;
+
   final SupabaseClient _client = Supabase.instance.client;
 
   late final TextEditingController _titleController;
@@ -968,6 +1099,14 @@ class _TaskEditorScreenState extends State<_TaskEditorScreen> {
       final Uint8List? bytes = file.bytes;
       if (bytes == null || bytes.isEmpty) {
         _showSnack('Could not read file.');
+        return;
+      }
+      final int maxSize = type == _TaskAttachmentType.image
+          ? _maxImageAttachmentBytes
+          : _maxVideoAttachmentBytes;
+      if (bytes.length > maxSize) {
+        final int maxMb = maxSize ~/ (1024 * 1024);
+        _showSnack('File too large. Max $maxMb MB for ${type.storageValue}.');
         return;
       }
 
@@ -1228,7 +1367,7 @@ class _TaskEditorScreenState extends State<_TaskEditorScreen> {
             children: [
               TextField(
                 controller: _titleController,
-                style: const TextStyle(
+                style: TextStyle(
                   color: textColor,
                   fontSize: 30,
                   fontWeight: FontWeight.w800,
@@ -1248,11 +1387,7 @@ class _TaskEditorScreenState extends State<_TaskEditorScreen> {
                 controller: _detailsController,
                 minLines: 2,
                 maxLines: 5,
-                style: const TextStyle(
-                  color: textColor,
-                  fontSize: 16,
-                  height: 1.3,
-                ),
+                style: TextStyle(color: textColor, fontSize: 16, height: 1.3),
                 decoration: InputDecoration(
                   hintText: 'Details',
                   hintStyle: TextStyle(
@@ -1508,7 +1643,7 @@ class _EditorSectionHeader extends StatelessWidget {
       children: [
         Text(
           title,
-          style: const TextStyle(
+          style: TextStyle(
             color: textColor,
             fontWeight: FontWeight.w800,
             fontSize: 16,
