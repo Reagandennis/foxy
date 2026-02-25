@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_quill/flutter_quill.dart' as quill;
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -118,7 +119,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final String query = _searchQuery.toLowerCase();
     return notes.where((_NoteItem note) {
       return note.title.toLowerCase().contains(query) ||
-          note.body.toLowerCase().contains(query) ||
+          note.searchableBody.toLowerCase().contains(query) ||
           note.clips.any(
             (_NoteClip clip) => clip.searchText.toLowerCase().contains(query),
           );
@@ -166,7 +167,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final String title = result.title.trimRight();
-    final String body = result.body.trimRight();
+    final String body = result.body;
 
     if (note == null) {
       if (title.isEmpty &&
@@ -820,9 +821,12 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
   final Map<String, Future<String?>> _photoPreviewUrlCache =
       <String, Future<String?>>{};
   late final TextEditingController _titleController;
-  late final TextEditingController _bodyController;
+  late final quill.QuillController _bodyController;
+  late final FocusNode _bodyFocusNode;
+  late final ScrollController _bodyScrollController;
   late final String _initialTitle;
   late final String _initialBody;
+  late final String _initialBodySignature;
   late final bool _initialPinned;
   late final List<_NoteClip> _initialClips;
   late bool _isPinned;
@@ -841,13 +845,20 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
     _isPinned = _initialPinned;
     _clips = List<_NoteClip>.from(_initialClips);
     _titleController = TextEditingController(text: _initialTitle);
-    _bodyController = TextEditingController(text: _initialBody);
+    _bodyController = _NoteBodyCodec.controllerFromStorage(_initialBody);
+    _bodyFocusNode = FocusNode();
+    _bodyScrollController = ScrollController();
+    _initialBodySignature = _NoteBodyCodec.canonicalDeltaJsonFromStorage(
+      _initialBody,
+    );
   }
 
   @override
   void dispose() {
     _titleController.dispose();
     _bodyController.dispose();
+    _bodyFocusNode.dispose();
+    _bodyScrollController.dispose();
     super.dispose();
   }
 
@@ -882,10 +893,14 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
     }
 
     final String title = _titleController.text.trimRight();
-    final String body = _bodyController.text.trimRight();
+    final String body = _NoteBodyCodec.encodeForStorage(
+      _bodyController.document,
+    );
+    final String currentBodySignature =
+        _NoteBodyCodec.canonicalDeltaJsonFromDocument(_bodyController.document);
 
     if (title == _initialTitle &&
-        body == _initialBody &&
+        currentBodySignature == _initialBodySignature &&
         _isPinned == _initialPinned &&
         _clipsEqual(_clips, _initialClips)) {
       Navigator.of(context).pop();
@@ -1495,28 +1510,46 @@ class _NoteEditorScreenState extends State<_NoteEditorScreen> {
                   ),
                   const SizedBox(height: 8),
                 ],
-                Expanded(
-                  child: TextField(
+                Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: textColor.withValues(alpha: 0.1)),
+                  ),
+                  child: quill.QuillSimpleToolbar(
                     controller: _bodyController,
-                    keyboardType: TextInputType.multiline,
-                    textInputAction: TextInputAction.newline,
-                    minLines: null,
-                    maxLines: null,
-                    expands: true,
-                    style: const TextStyle(
-                      color: textColor,
-                      fontSize: 18,
-                      height: 1.35,
-                      fontWeight: FontWeight.w500,
+                    config: const quill.QuillSimpleToolbarConfig(
+                      showFontFamily: false,
+                      showFontSize: false,
+                      showColorButton: false,
+                      showBackgroundColorButton: false,
+                      showSearchButton: false,
+                      showSubscript: false,
+                      showSuperscript: false,
+                      showDirection: false,
+                      showLink: false,
                     ),
-                    decoration: InputDecoration(
-                      hintText: 'Start typing your note...',
-                      hintStyle: TextStyle(
-                        color: textColor.withValues(alpha: 0.44),
-                        fontSize: 18,
-                        fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: textColor.withValues(alpha: 0.1),
                       ),
-                      border: InputBorder.none,
+                    ),
+                    child: quill.QuillEditor(
+                      controller: _bodyController,
+                      focusNode: _bodyFocusNode,
+                      scrollController: _bodyScrollController,
+                      config: const quill.QuillEditorConfig(
+                        placeholder: 'Start typing your note...',
+                        expands: true,
+                        padding: EdgeInsets.fromLTRB(12, 12, 12, 12),
+                      ),
                     ),
                   ),
                 ),
@@ -1556,6 +1589,7 @@ class _NoteItem {
     required this.id,
     required this.title,
     required this.body,
+    required this.plainBody,
     required this.isPinned,
     required this.clips,
     required this.updatedAt,
@@ -1572,11 +1606,13 @@ class _NoteItem {
               .whereType<_NoteClip>()
               .toList(growable: false)
         : const <_NoteClip>[];
+    final String storedBody = map['body'] as String? ?? '';
 
     return _NoteItem(
       id: map['id'].toString(),
       title: map['title'] as String? ?? '',
-      body: map['body'] as String? ?? '',
+      body: storedBody,
+      plainBody: _NoteBodyCodec.plainTextFromStorage(storedBody),
       isPinned: map['is_pinned'] == true,
       clips: parsedClips,
       updatedAt: parsed,
@@ -1613,21 +1649,116 @@ class _NoteItem {
   }
 
   String get previewText {
-    if (body.trim().isNotEmpty && clipsSummary.isEmpty) {
-      return body;
+    if (plainBody.trim().isNotEmpty && clipsSummary.isEmpty) {
+      return plainBody;
     }
-    if (body.trim().isEmpty) {
+    if (plainBody.trim().isEmpty) {
       return clipsSummary;
     }
-    return '$body\n$clipsSummary';
+    return '$plainBody\n$clipsSummary';
   }
+
+  String get searchableBody => plainBody;
 
   final String id;
   final String title;
   final String body;
+  final String plainBody;
   final bool isPinned;
   final List<_NoteClip> clips;
   final DateTime updatedAt;
+}
+
+class _NoteBodyCodec {
+  static const String _richPrefix = '__foxy_rich_v1__:';
+
+  static quill.QuillController controllerFromStorage(String stored) {
+    final quill.Document document = documentFromStorage(stored);
+    final int cursor = document.length <= 1 ? 0 : document.length - 1;
+    return quill.QuillController(
+      document: document,
+      selection: TextSelection.collapsed(offset: cursor),
+    );
+  }
+
+  static quill.Document documentFromStorage(String stored) {
+    final String normalized = stored.replaceAll('\r\n', '\n');
+    if (normalized.trim().isEmpty) {
+      return quill.Document();
+    }
+
+    final String? richPayload = _richPayload(normalized);
+    if (richPayload != null) {
+      final quill.Document? richDoc = _documentFromJson(richPayload);
+      if (richDoc != null) {
+        return richDoc;
+      }
+    }
+
+    final quill.Document plainDoc = quill.Document();
+    plainDoc.insert(0, normalized);
+    return plainDoc;
+  }
+
+  static String encodeForStorage(quill.Document document) {
+    final String plain = document.toPlainText().trimRight();
+    if (plain.isEmpty) {
+      return '';
+    }
+    if (!_hasFormatting(document)) {
+      return plain;
+    }
+    return '$_richPrefix${canonicalDeltaJsonFromDocument(document)}';
+  }
+
+  static String canonicalDeltaJsonFromStorage(String stored) {
+    return canonicalDeltaJsonFromDocument(documentFromStorage(stored));
+  }
+
+  static String canonicalDeltaJsonFromDocument(quill.Document document) {
+    return jsonEncode(document.toDelta().toJson());
+  }
+
+  static String plainTextFromStorage(String stored) {
+    return documentFromStorage(stored).toPlainText().trimRight();
+  }
+
+  static bool _hasFormatting(quill.Document document) {
+    final List<dynamic> ops = document.toDelta().toJson();
+    for (final dynamic rawOp in ops) {
+      if (rawOp is! Map) {
+        continue;
+      }
+      final dynamic attributes = rawOp['attributes'];
+      if (attributes is Map && attributes.isNotEmpty) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static String? _richPayload(String body) {
+    if (!body.startsWith(_richPrefix)) {
+      return null;
+    }
+    final String payload = body.substring(_richPrefix.length).trim();
+    if (payload.isEmpty) {
+      return null;
+    }
+    return payload;
+  }
+
+  static quill.Document? _documentFromJson(String payload) {
+    try {
+      final dynamic decoded = jsonDecode(payload);
+      if (decoded is! List) {
+        return null;
+      }
+      return quill.Document.fromJson(decoded.cast<Map<String, dynamic>>());
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 enum _NoteClipType { photo, video, webClip }
