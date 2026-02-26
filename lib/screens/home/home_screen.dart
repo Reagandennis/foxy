@@ -79,10 +79,6 @@ class _HomeScreenState extends State<HomeScreen> {
         );
   }
 
-  bool _sameDay(DateTime a, DateTime b) {
-    return a.year == b.year && a.month == b.month && a.day == b.day;
-  }
-
   int _completionStreak(List<_TaskLite> tasks) {
     final Set<String> completedDays = tasks
         .where((_TaskLite task) => task.isCompleted)
@@ -117,12 +113,6 @@ class _HomeScreenState extends State<HomeScreen> {
         .where((_TaskLite task) => task.isCompleted)
         .length;
     final int total = tasks.length;
-    final int todayCompleted = tasks
-        .where(
-          (_TaskLite task) =>
-              task.isCompleted && _sameDay(task.updatedAt, DateTime.now()),
-        )
-        .length;
     final int streak = _completionStreak(tasks);
 
     final bool hasNote = notes.isNotEmpty;
@@ -148,10 +138,6 @@ class _HomeScreenState extends State<HomeScreen> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                _MomentumPill(
-                  icon: Icons.today_rounded,
-                  text: 'Today $todayCompleted done',
-                ),
                 _MomentumPill(
                   icon: Icons.local_fire_department_rounded,
                   text: 'Streak ${streak}d',

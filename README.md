@@ -191,6 +191,18 @@ Notes:
 - `android/key.properties` is gitignored.
 - Without this file, release builds fall back to debug signing (for local testing only).
 
+### One-command Play prep
+After setting `android/key.properties`, run:
+
+```bash
+./scripts/play_release_prep.sh
+```
+
+What it does:
+- validates signing files and build defines
+- runs `flutter analyze` and `flutter test`
+- builds a release Android App Bundle (`.aab`) for Play Console
+
 ## Run, Analyze, Test
 ```bash
 flutter run --dart-define-from-file=supabase.local.json
